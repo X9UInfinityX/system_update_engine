@@ -219,7 +219,9 @@ class UpdateAttempterAndroid final
   //   |kPrefsPayloadAttemptNumber|, |kPrefsUpdateTimestampStart|,
   //   |kPrefsUpdateBootTimestampStart|
   void UpdatePrefsOnUpdateStart(bool is_resume);
+  bool PreserveCurrentPartition(const char* partition_name, const char* label);
   bool PreserveCurrentAbl();
+  bool PreserveCurrentRecovery();
 
   // Prefs to delete:
   //   |kPrefsNumReboots|, |kPrefsCurrentBytesDownloaded|

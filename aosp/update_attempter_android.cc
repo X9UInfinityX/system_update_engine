@@ -90,8 +90,11 @@ namespace {
 const double kBroadcastThresholdProgress = 0.01;  // 1%
 const int kBroadcastThresholdSeconds = 10;
 constexpr char kKeepCurrentAblProperty[] = "persist.vendor.keep_current_abl";
+constexpr char kKeepCurrentRecoveryProperty[] =
+    "persist.vendor.keep_current_recovery";
 constexpr char kAblPartitionName[] = "abl";
-constexpr size_t kAblCopyBufferSize = 1024 * 1024;
+constexpr char kRecoveryPartitionName[] = "recovery";
+constexpr size_t kPartitionCopyBufferSize = 1024 * 1024;
 
 // Log and set the error on the passed ErrorPtr.
 bool LogAndSetGenericError(Error* error,
@@ -901,31 +904,33 @@ void UpdateAttempterAndroid::OnVerifyProgressUpdate(double progress) {
   ProgressUpdate(progress);
 }
 
-bool UpdateAttempterAndroid::PreserveCurrentAbl() {
+bool UpdateAttempterAndroid::PreserveCurrentPartition(
+    const char* partition_name, const char* label) {
   std::string source_path;
   std::string target_path;
-  if (!boot_control_->GetPartitionDevice(kAblPartitionName,
+  if (!boot_control_->GetPartitionDevice(partition_name,
                                          install_plan_.source_slot,
                                          &source_path)) {
-    LOG(ERROR) << "Failed to resolve active ABL block device";
+    LOG(ERROR) << "Failed to resolve active " << label << " block device";
     return false;
   }
-  if (!boot_control_->GetPartitionDevice(kAblPartitionName,
+  if (!boot_control_->GetPartitionDevice(partition_name,
                                          install_plan_.target_slot,
                                          &target_path)) {
-    LOG(ERROR) << "Failed to resolve target ABL block device";
+    LOG(ERROR) << "Failed to resolve target " << label << " block device";
     return false;
   }
 
   android::base::unique_fd source_fd(
       HANDLE_EINTR(open(source_path.c_str(), O_RDONLY | O_CLOEXEC)));
   if (source_fd < 0) {
-    PLOG(ERROR) << "Failed to open active ABL " << source_path;
+    PLOG(ERROR) << "Failed to open active " << label << " " << source_path;
     return false;
   }
 
   if (!utils::SetBlockDeviceReadOnly(target_path, false)) {
-    LOG(ERROR) << "Failed to make target ABL writable: " << target_path;
+    LOG(ERROR) << "Failed to make target " << label
+               << " writable: " << target_path;
     return false;
   }
   auto fail_after_target_writable = [&target_path]() {
@@ -936,26 +941,26 @@ bool UpdateAttempterAndroid::PreserveCurrentAbl() {
   android::base::unique_fd target_fd(
       HANDLE_EINTR(open(target_path.c_str(), O_WRONLY | O_CLOEXEC)));
   if (target_fd < 0) {
-    PLOG(ERROR) << "Failed to open target ABL " << target_path;
+    PLOG(ERROR) << "Failed to open target " << label << " " << target_path;
     return fail_after_target_writable();
   }
 
   const off64_t source_size = utils::FileSize(source_fd.get());
   const off64_t target_size = utils::FileSize(target_fd.get());
   if (source_size <= 0 || target_size <= 0 || source_size != target_size) {
-    LOG(ERROR) << "Invalid ABL sizes, source=" << source_size
+    LOG(ERROR) << "Invalid " << label << " sizes, source=" << source_size
                << " target=" << target_size;
     return fail_after_target_writable();
   }
 
-  std::vector<uint8_t> buffer(kAblCopyBufferSize);
+  std::vector<uint8_t> buffer(kPartitionCopyBufferSize);
   off64_t remaining = source_size;
   while (remaining > 0) {
     const size_t chunk = static_cast<size_t>(
         std::min(static_cast<off64_t>(buffer.size()), remaining));
     ssize_t bytes_read = HANDLE_EINTR(read(source_fd.get(), buffer.data(), chunk));
     if (bytes_read <= 0) {
-      PLOG(ERROR) << "Failed to read active ABL";
+      PLOG(ERROR) << "Failed to read active " << label;
       return fail_after_target_writable();
     }
 
@@ -966,7 +971,7 @@ bool UpdateAttempterAndroid::PreserveCurrentAbl() {
                                                 static_cast<size_t>(bytes_read) -
                                                     written));
       if (bytes_written <= 0) {
-        PLOG(ERROR) << "Failed to write target ABL";
+        PLOG(ERROR) << "Failed to write target " << label;
         return fail_after_target_writable();
       }
       written += bytes_written;
@@ -975,7 +980,7 @@ bool UpdateAttempterAndroid::PreserveCurrentAbl() {
   }
 
   if (fsync(target_fd.get()) != 0) {
-    PLOG(ERROR) << "Failed to fsync target ABL";
+    PLOG(ERROR) << "Failed to fsync target " << label;
     return fail_after_target_writable();
   }
   source_fd.reset();
@@ -986,12 +991,13 @@ bool UpdateAttempterAndroid::PreserveCurrentAbl() {
   android::base::unique_fd verify_target_fd(
       HANDLE_EINTR(open(target_path.c_str(), O_RDONLY | O_CLOEXEC)));
   if (verify_source_fd < 0 || verify_target_fd < 0) {
-    PLOG(ERROR) << "Failed to reopen ABL partitions for verification";
+    PLOG(ERROR) << "Failed to reopen " << label
+                << " partitions for verification";
     return fail_after_target_writable();
   }
 
-  std::vector<uint8_t> source_buffer(kAblCopyBufferSize);
-  std::vector<uint8_t> target_buffer(kAblCopyBufferSize);
+  std::vector<uint8_t> source_buffer(kPartitionCopyBufferSize);
+  std::vector<uint8_t> target_buffer(kPartitionCopyBufferSize);
   remaining = source_size;
   while (remaining > 0) {
     const size_t chunk = static_cast<size_t>(
@@ -1002,25 +1008,35 @@ bool UpdateAttempterAndroid::PreserveCurrentAbl() {
         HANDLE_EINTR(read(verify_target_fd.get(), target_buffer.data(), chunk));
     if (source_read != static_cast<ssize_t>(chunk) ||
         target_read != static_cast<ssize_t>(chunk)) {
-      LOG(ERROR) << "Failed to read ABL partitions for verification";
+      LOG(ERROR) << "Failed to read " << label
+                 << " partitions for verification";
       return fail_after_target_writable();
     }
     if (!std::equal(source_buffer.begin(),
                     source_buffer.begin() + chunk,
                     target_buffer.begin())) {
-      LOG(ERROR) << "Target ABL verification failed";
+      LOG(ERROR) << "Target " << label << " verification failed";
       return fail_after_target_writable();
     }
     remaining -= source_read;
   }
 
   if (!utils::SetBlockDeviceReadOnly(target_path, true)) {
-    LOG(WARNING) << "Failed to restore target ABL read-only state: "
+    LOG(WARNING) << "Failed to restore target " << label << " read-only state: "
                  << target_path;
   }
 
-  LOG(INFO) << "Copied active-slot ABL to updated slot and verified it";
+  LOG(INFO) << "Copied active-slot " << label
+            << " to updated slot and verified it";
   return true;
+}
+
+bool UpdateAttempterAndroid::PreserveCurrentAbl() {
+  return PreserveCurrentPartition(kAblPartitionName, "ABL");
+}
+
+bool UpdateAttempterAndroid::PreserveCurrentRecovery() {
+  return PreserveCurrentPartition(kRecoveryPartitionName, "recovery");
 }
 
 void UpdateAttempterAndroid::ScheduleProcessingStart() {
@@ -1044,6 +1060,15 @@ void UpdateAttempterAndroid::TerminateUpdateAndNotify(ErrorCode error_code) {
       android::base::GetBoolProperty(kKeepCurrentAblProperty, false)) {
     LOG(INFO) << "Preserving current ABL on updated slot";
     if (!PreserveCurrentAbl()) {
+      error_code = ErrorCode::kPostinstallRunnerError;
+    }
+  }
+  if (error_code == ErrorCode::kSuccess &&
+      status_ != UpdateStatus::CLEANUP_PREVIOUS_UPDATE &&
+      install_plan_.target_slot != BootControlInterface::kInvalidSlot &&
+      android::base::GetBoolProperty(kKeepCurrentRecoveryProperty, false)) {
+    LOG(INFO) << "Preserving current recovery on updated slot";
+    if (!PreserveCurrentRecovery()) {
       error_code = ErrorCode::kPostinstallRunnerError;
     }
   }
