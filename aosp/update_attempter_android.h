@@ -219,6 +219,7 @@ class UpdateAttempterAndroid final
   //   |kPrefsPayloadAttemptNumber|, |kPrefsUpdateTimestampStart|,
   //   |kPrefsUpdateBootTimestampStart|
   void UpdatePrefsOnUpdateStart(bool is_resume);
+  bool PreserveCurrentAbl();
 
   // Prefs to delete:
   //   |kPrefsNumReboots|, |kPrefsCurrentBytesDownloaded|
